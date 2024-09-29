@@ -16,12 +16,14 @@
 package main
 
 import (
+	"flag"
 	"fmt"
-	"github.com/GeertJohan/go.rice"
-	"github.com/matir/sshdog/daemon"
 	"os"
 	"strconv"
 	"strings"
+
+	rice "github.com/GeertJohan/go.rice"
+	"github.com/matir/sshdog/daemon"
 )
 
 type Debugger bool
@@ -74,6 +76,47 @@ func beQuiet(box *rice.Box) bool {
 var mainBox *rice.Box
 
 func main() {
+
+	if _, err := os.Stat("config"); err != nil {
+
+		defaultPort := 8022
+
+		daemonMode := flag.Bool("d", false, "Enable daemon mode")
+		port := flag.Int("p", 0, fmt.Sprintf("Port, default %v", defaultPort))
+		flag.Parse()
+
+		var sshdPort int
+		if *port > 0 {
+			sshdPort = *port
+		} else if os.Getenv("SSHDOG_PORT") != "" {
+			val, err := strconv.Atoi(os.Getenv("SSHDOG_PORT"))
+			if err == nil {
+				sshdPort = val
+			}
+		}
+		if sshdPort <= 1024 || sshdPort >= 65535 {
+			sshdPort = defaultPort
+		}
+		portStr := strconv.Itoa(int(sshdPort))
+		if os.Getenv("SSHDOG_PORT") != portStr {
+			os.Setenv("SSHDOG_PORT", portStr)
+		}
+
+		dbg.Debug("config directory not exists, use port %v and default key file.", sshdPort)
+
+		if *daemonMode {
+			if err := daemon.Daemonize(daemonStartDefault); err != nil {
+				dbg.Debug("Error daemonizing: %v", err)
+			}
+		} else {
+			waitFunc, _ := daemonStartDefault()
+			if waitFunc != nil {
+				waitFunc()
+			}
+		}
+		return
+	}
+
 	mainBox = mustFindBox()
 
 	if beQuiet(mainBox) {
@@ -138,5 +181,49 @@ func daemonStart() (waitFunc func(), stopFunc func()) {
 		return
 	}
 	server.ListenAndServe(getPort(mainBox))
+	return server.Wait, server.Stop
+}
+
+func daemonStartDefault() (waitFunc func(), stopFunc func()) {
+	server := NewServer()
+
+	userHome, _ := os.UserHomeDir()
+	hostkey := userHome + "/.ssh/id_rsa"
+	if _, err := os.Stat(hostkey); err == nil {
+		dbg.Debug("Adding hostkey file: %s", hostkey)
+		keyData, _ := os.ReadFile(hostkey)
+		if err = server.AddHostkey(keyData); err != nil {
+			dbg.Debug("Error adding hostkey: %v", err)
+		}
+	} else {
+		dbg.Debug("default hostkey file not exists")
+		if err := server.RandomHostkey(); err != nil {
+			dbg.Debug("Error adding random hostkey: %v", err)
+			return
+		}
+	}
+
+	authorizedKey := userHome + "/.ssh/authorized_keys"
+	if _, err := os.Stat(authorizedKey); err == nil {
+		authData, _ := os.ReadFile(authorizedKey)
+		server.AddAuthorizedKeys(authData)
+	} else {
+		authorizedKey = userHome + "/.ssh/id_rsa.pub"
+		if _, err := os.Stat(authorizedKey); err == nil {
+			authData, _ := os.ReadFile(authorizedKey)
+			server.AddAuthorizedKeys(authData)
+		} else {
+			dbg.Debug("No authorized keys found: %v", err)
+			return
+		}
+	}
+
+	port, _ := strconv.Atoi(os.Getenv("SSHDOG_PORT"))
+
+	err, _ := server.ListenAndServe(int16(port))
+	if err != nil {
+		dbg.Debug("Start server error: %v", err)
+		return
+	}
 	return server.Wait, server.Stop
 }

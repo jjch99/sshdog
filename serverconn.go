@@ -28,6 +28,7 @@ import (
 
 	"github.com/google/shlex"
 	"github.com/matir/sshdog/pty"
+	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -140,6 +141,27 @@ func commandWithShell(command string) []string {
 	}
 }
 
+func (conn *ServerConn) handleSFTP(channel ssh.Channel) {
+
+	server, err := sftp.NewServer(channel)
+	if err != nil {
+		return
+	}
+	defer server.Close()
+
+	var exitStatus uint32
+	if err := server.Serve(); err == nil || err == io.EOF {
+		exitStatus = 0
+	} else {
+		exitStatus = 1
+	}
+
+	b := ssh.Marshal(struct{ ExitStatus uint32 }{exitStatus})
+	channel.SendRequest("exit-status", false, b)
+	dbg.Debug("Closing session channel for sftp.")
+	channel.Close()
+}
+
 func (conn *ServerConn) HandleSessionChannel(wg *sync.WaitGroup, newChan ssh.NewChannel) {
 	// TODO: refactor this, too long
 	defer wg.Done()
@@ -225,6 +247,14 @@ func (conn *ServerConn) HandleSessionChannel(wg *sync.WaitGroup, newChan ssh.New
 				}
 			}
 			return
+		case "subsystem":
+			// SFTP
+			if string(req.Payload[4:]) == "sftp" {
+				conn.handleSFTP(ch)
+				req.Reply(true, nil)
+			} else {
+				req.Reply(true, nil)
+			}
 		default:
 			dbg.Debug("Unknown session request: %s", req.Type)
 			if req.WantReply {
